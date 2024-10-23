@@ -18,10 +18,10 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "string.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "string.h"
 
 /* USER CODE END Includes */
 
@@ -41,33 +41,21 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-#if defined ( __ICCARM__ ) /*!< IAR Compiler */
-#pragma location=0x30000000
-ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-#pragma location=0x30000080
-ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
-
-#elif defined ( __CC_ARM )  /* MDK ARM Compiler */
-
-__attribute__((at(0x30000000))) ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-__attribute__((at(0x30000080))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
-
-#elif defined ( __GNUC__ ) /* GNU Compiler */
-
-ETH_DMADescTypeDef DMARxDscrTab[ETH_RX_DESC_CNT] __attribute__((section(".RxDecripSection"))); /* Ethernet Rx DMA Descriptors */
-ETH_DMADescTypeDef DMATxDscrTab[ETH_TX_DESC_CNT] __attribute__((section(".TxDecripSection")));   /* Ethernet Tx DMA Descriptors */
-#endif
-
-ETH_TxPacketConfig TxConfig;
-
-ETH_HandleTypeDef heth;
 
 UART_HandleTypeDef huart2;
-UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart2_tx;
 DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
+
+
+#if defined( __ICCARM__ )
+  #define DMA_BUFFER \
+      _Pragma("location=\".dma_buffer\"")
+#else
+  #define DMA_BUFFER \
+      __attribute__((section(".dma_buffer")))
+#endif
 
 /* application config */
 uint8_t testSendingOnInit = 1;
@@ -76,9 +64,15 @@ uint8_t testSendingStopOnReceivedData = 1;
 /* application status */
 uint8_t testSending = 0;
 uint8_t greenOn = 0;
+uint8_t redOn = 0;
 uint8_t yellowOn = 0;
 
 /* statistics and debugging */
+
+uint16_t errorCounter = 0;
+
+uint16_t uartRXUnknownInterrupt = 0;
+
 uint16_t messagesTXCompleted = 0;				/* successfully sent messages */
 uint16_t messagesTXCompletedUnexpected = 0;		/* unexpected (unknown not sent by us) successfully sent messages */
 uint16_t messagesTXSkipped = 0;					/* skipped message sending because previous is not finished */
@@ -108,7 +102,7 @@ volatile uint8_t uartRXCompleteOnActiveToIdleLine = 0;
 
 /* Buffer and size for MODBUS response */
 #define MODBUS_TX_BUFFER_SIZE 256  				/* Adjust this size based on expected response length */
-uint8_t modbusResponse[MODBUS_TX_BUFFER_SIZE];  /* Buffer for preparation of the MODBUS response message */
+DMA_BUFFER uint8_t modbusResponse[MODBUS_TX_BUFFER_SIZE];  /* Buffer for preparation of the MODBUS response message */
 uint8_t modbusResponseSize = 0;
 
 /* Buffer for Test Message Send */
@@ -116,7 +110,7 @@ const uint8_t messageTestSend[] = {0x01, 0x03, 0x02, 0x00, 0x10, 0xB9, 0x88};  /
 
 /* Buffer and size for MODBUS requests */
 #define MODBUS_RX_BUFFER_SIZE 256  				/* Adjust this size based on expected request length */
-uint8_t modbusRequest[MODBUS_RX_BUFFER_SIZE];  	/* Buffer to store incoming MODBUS requests */
+DMA_BUFFER uint8_t modbusRequest[MODBUS_RX_BUFFER_SIZE];  	/* Buffer to store incoming MODBUS requests */
 volatile uint16_t modbusBytesReceived = 0;
 
 /* timing */
@@ -124,8 +118,11 @@ uint32_t previousMillisTest = 0;   // To store the last tick for test message
 const uint32_t intervalTest = 500; // 500 ms interval test
 
 uint32_t previousMillisLedGreen = 0;   // To store the last tick for turn led off
+uint32_t previousMillisLedRed = 0;   // To store the last tick for turn led off
 uint32_t previousMillisLedYellow = 0;   // To store the last tick for turn led off
-const uint32_t intervalLed = 10; // 10 ms interval for led
+const uint32_t intervalLedGreen = 100; // ms interval for led
+const uint32_t intervalLedRed = 100; // ms interval for led
+const uint32_t intervalLedYellow = 1000; // ms interval for led
 
 
 
@@ -135,9 +132,6 @@ const uint32_t intervalLed = 10; // 10 ms interval for led
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-static void MX_ETH_Init(void);
-static void MX_USART3_UART_Init(void);
-static void MX_USB_OTG_HS_USB_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -150,9 +144,16 @@ void enableReceiveMessage(void);
 
 void setGreenLed(void)
 {
-	HAL_GPIO_WritePin(GPIOB, LED_GREEN_Pin|LED_RED_Pin, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(GPIOB, LED_GREEN_Pin, GPIO_PIN_SET);
 	greenOn = 1;
 	previousMillisLedGreen = HAL_GetTick();
+}
+
+void setRedLed(void)
+{
+	HAL_GPIO_WritePin(GPIOB, LED_RED_Pin, GPIO_PIN_SET);
+	redOn = 1;
+	previousMillisLedRed = HAL_GetTick();
 }
 
 void setYellowLed(void)
@@ -164,8 +165,14 @@ void setYellowLed(void)
 
 void resetGreenLed(void)
 {
-	HAL_GPIO_WritePin(GPIOB, LED_GREEN_Pin|LED_RED_Pin, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOB, LED_GREEN_Pin, GPIO_PIN_RESET);
 	greenOn = 0;
+}
+
+void resetRedLed(void)
+{
+	HAL_GPIO_WritePin(GPIOB, LED_RED_Pin, GPIO_PIN_RESET);
+	redOn = 0;
 }
 
 void resetYellowLed(void)
@@ -193,7 +200,12 @@ void sendPreparedModbusResponse(void)
 	{
 		/* Start UART transmission using DMA */
 		HAL_UART_Transmit_DMA(&huart2, modbusResponse, modbusResponseSize);
+	    /* Enable Transmission Complete Interrupt for UART2 */
+	    //__HAL_UART_ENABLE_IT(&huart2, UART_IT_TC);
+
 		sendingMessage = 1;
+		setGreenLed();
+        //printf("Starting transmission of %d bytes\n", modbusResponseSize);  // Debugging line
 	}
 	else
 	{
@@ -230,6 +242,7 @@ void configureDMAforUART2TX(void)
     if (HAL_DMA_Init(&hdma_usart2_tx) != HAL_OK)
     {
     	/* Initialization error */
+    	errorCounter++;
         Error_Handler();
     }
 
@@ -253,6 +266,7 @@ void configureDMAforUART2RX(void)
     if (HAL_DMA_Init(&hdma_usart2_rx) != HAL_OK)
     {
         /* Initialization error */
+    	errorCounter++;
         Error_Handler();
     }
 
@@ -270,7 +284,10 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     	if (sendingMessage)
     	{
     		sendingMessage = 0;
+
 			enableReceiveMessage();
+	        /* Optional: Disable the TC interrupt after the transmission is complete */
+	        //__HAL_UART_DISABLE_IT(huart, UART_IT_TC);
     	}
     	else
     	{
@@ -279,6 +296,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
     }
 }
+
 
 /* DMA reception complete callback (when buffer is filled) */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -312,10 +330,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 /* UART interrupt handler for idle line detection */
 void USART2_IRQHandler(void)
 {
+    // Handle Transmission Complete (TC)
+    if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC) && __HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_TC))
+    {
+        __HAL_UART_CLEAR_FLAG(&huart2, UART_FLAG_TC); // Clear Transmission Complete flag
+        HAL_UART_TxCpltCallback(&huart2); // Call the Transmission Complete callback
+        return;
+    }
+
     if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_IDLE))
     {
-        // Clear the idle line flag by reading the status register and data register
-        __HAL_UART_CLEAR_IDLEFLAG(&huart2);
+        /* Clear the idle line flag by reading the status register and data register */
+		__HAL_UART_CLEAR_IDLEFLAG(&huart2);
 
 		// Stop the DMA temporarily to process the received data
 		HAL_UART_DMAStop(&huart2);
@@ -350,22 +376,31 @@ void USART2_IRQHandler(void)
 			uartRXDeny = 1;
         }
     }
+    else
+    {
+    	uartRXUnknownInterrupt++;
+    }
 }
 
 void enableReceiveMessageOnInit(void)
 {
     /* Start receiving data using UART and DMA in circular mode */
     uartRXDeny = 0;
+
 	HAL_UART_Receive_DMA(&huart2, modbusRequest, sizeof(modbusRequest));
 
+    /* Clear the idle line flag by reading the status register and data register */
+    __HAL_UART_CLEAR_IDLEFLAG(&huart2);
     /* Enable UART idle line detection interrupt */
     __HAL_UART_ENABLE_IT(&huart2, UART_IT_IDLE);
+
 }
 
 void enableReceiveMessage(void)
 {
 	/* Restart DMA reception for the next request */
 	uartRXDeny = 0;
+
 	HAL_UART_Receive_DMA(&huart2, modbusRequest, sizeof(modbusRequest));
 }
 
@@ -378,15 +413,17 @@ void processReceivedModbusRequests(void)
 		uartRXCompleteOnFullBuffer = 0;
 
 
-		if (testSendingStopOnReceivedData)
-		{
-			testSending = 0;
-		}
 
-
-		if (modbusBytesReceived)
+		if (modbusBytesReceived)		/* received non-empty message */
 		{
+			setRedLed();
+			if (testSendingStopOnReceivedData)
+			{
+				testSending = 0;
+			}
+
 			messagesRXProcessed++;
+
 
 			/* Prepare response to the received MODBUS request */
 			modbusResponsePrepareForLastReceivedRequest();	/* modbusBytesReceived and modbusRequest used inside | modbusResponseSize and modbusResponse touched inside */
@@ -406,6 +443,7 @@ void processReceivedModbusRequests(void)
 		else
 		{
 			messageRXZeroBytes++;
+			enableReceiveMessage();
 		}
 	}
 	else
@@ -446,9 +484,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_ETH_Init();
-  MX_USART3_UART_Init();
-  MX_USB_OTG_HS_USB_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
@@ -459,6 +494,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  HAL_Delay(10);	//10 ms delay
   enableReceiveMessageOnInit();
   testSending = testSendingOnInit;
 
@@ -487,20 +523,42 @@ int main(void)
 	  if (greenOn)
 	  {
 		  /* Non-blocking Led Green ms delay */
-		  if (currrentMillis - previousMillisLedGreen >= intervalLed)
+		  if (currrentMillis - previousMillisLedGreen >= intervalLedGreen)
 		  {
 			  previousMillisLedGreen = currrentMillis;  /* Update the last tick */
 			  resetGreenLed(); /* turn off led  */
 		  }
 	  }
 
+	  if (redOn)
+	  {
+		  /* Non-blocking Led Red ms delay */
+		  if (currrentMillis - previousMillisLedRed >= intervalLedRed)
+		  {
+			  previousMillisLedRed = currrentMillis;  /* Update the last tick */
+			  resetRedLed();  /* turn off led  */
+		  }
+	  }
+
 	  if (yellowOn)
 	  {
 		  /* Non-blocking Led Yellow ms delay */
-		  if (currrentMillis - previousMillisLedYellow >= intervalLed)
+		  if (currrentMillis - previousMillisLedYellow >= intervalLedYellow)
 		  {
 			  previousMillisLedYellow = currrentMillis;  /* Update the last tick */
-			  resetYellowLed();  /* turn off led  */
+			  resetYellowLed(); /* turn off led  */
+		      //printf("Yellow Pulse Off\n");  // Debugging line
+
+		  }
+	  }
+	  else
+	  {
+		  /* Non-blocking Led Yellow ms delay */
+		  if (currrentMillis - previousMillisLedYellow >= intervalLedYellow)
+		  {
+			  previousMillisLedYellow = currrentMillis;  /* Update the last tick */
+			  setYellowLed(); /* turn on led  */
+			  //printf("Yellow Pulse On\n");  // Debugging line
 		  }
 	  }
 
@@ -533,9 +591,8 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
-  RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 4;
@@ -568,55 +625,6 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-}
-
-/**
-  * @brief ETH Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ETH_Init(void)
-{
-
-  /* USER CODE BEGIN ETH_Init 0 */
-
-  /* USER CODE END ETH_Init 0 */
-
-   static uint8_t MACAddr[6];
-
-  /* USER CODE BEGIN ETH_Init 1 */
-
-  /* USER CODE END ETH_Init 1 */
-  heth.Instance = ETH;
-  MACAddr[0] = 0x00;
-  MACAddr[1] = 0x80;
-  MACAddr[2] = 0xE1;
-  MACAddr[3] = 0x00;
-  MACAddr[4] = 0x00;
-  MACAddr[5] = 0x00;
-  heth.Init.MACAddr = &MACAddr[0];
-  heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
-  heth.Init.TxDesc = DMATxDscrTab;
-  heth.Init.RxDesc = DMARxDscrTab;
-  heth.Init.RxBuffLen = 1524;
-
-  /* USER CODE BEGIN MACADDRESS */
-
-  /* USER CODE END MACADDRESS */
-
-  if (HAL_ETH_Init(&heth) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
-  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
-  TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
-  TxConfig.CRCPadCtrl = ETH_CRC_PAD_INSERT;
-  /* USER CODE BEGIN ETH_Init 2 */
-
-  /* USER CODE END ETH_Init 2 */
-
 }
 
 /**
@@ -662,77 +670,9 @@ static void MX_USART2_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART2_Init 2 */
-
+  HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);  // Set high priority for USART2
+  HAL_NVIC_EnableIRQ(USART2_IRQn);  // Enable interrupt for USART2
   /* USER CODE END USART2_Init 2 */
-
-}
-
-/**
-  * @brief USART3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART3_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART3_Init 0 */
-
-  /* USER CODE END USART3_Init 0 */
-
-  /* USER CODE BEGIN USART3_Init 1 */
-
-  /* USER CODE END USART3_Init 1 */
-  huart3.Instance = USART3;
-  huart3.Init.BaudRate = 115200;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX_RX;
-  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART3_Init 2 */
-
-  /* USER CODE END USART3_Init 2 */
-
-}
-
-/**
-  * @brief USB_OTG_HS Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USB_OTG_HS_USB_Init(void)
-{
-
-  /* USER CODE BEGIN USB_OTG_HS_Init 0 */
-
-  /* USER CODE END USB_OTG_HS_Init 0 */
-
-  /* USER CODE BEGIN USB_OTG_HS_Init 1 */
-
-  /* USER CODE END USB_OTG_HS_Init 1 */
-  /* USER CODE BEGIN USB_OTG_HS_Init 2 */
-
-  /* USER CODE END USB_OTG_HS_Init 2 */
 
 }
 
@@ -752,9 +692,6 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
-  /* DMAMUX1_OVR_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMAMUX1_OVR_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMAMUX1_OVR_IRQn);
 
 }
 
@@ -793,12 +730,44 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : RMII_MDC_Pin RMII_RXD0_Pin RMII_RXD1_Pin */
+  GPIO_InitStruct.Pin = RMII_MDC_Pin|RMII_RXD0_Pin|RMII_RXD1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : RMII_REF_CLK_Pin RMII_CRS_DV_Pin */
+  GPIO_InitStruct.Pin = RMII_REF_CLK_Pin|RMII_CRS_DV_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /*Configure GPIO pins : LED_GREEN_Pin LED_RED_Pin */
   GPIO_InitStruct.Pin = LED_GREEN_Pin|LED_RED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : RMII_TXD1_Pin */
+  GPIO_InitStruct.Pin = RMII_TXD1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(RMII_TXD1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : STLK_VCP_RX_Pin STLK_VCP_TX_Pin */
+  GPIO_InitStruct.Pin = STLK_VCP_RX_Pin|STLK_VCP_TX_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
   /*Configure GPIO pin : USB_FS_PWR_EN_Pin */
   GPIO_InitStruct.Pin = USB_FS_PWR_EN_Pin;
@@ -813,12 +782,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(USB_FS_OVCR_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : USB_FS_VBUS_Pin */
-  GPIO_InitStruct.Pin = USB_FS_VBUS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(USB_FS_VBUS_GPIO_Port, &GPIO_InitStruct);
-
   /*Configure GPIO pin : USB_FS_ID_Pin */
   GPIO_InitStruct.Pin = USB_FS_ID_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
@@ -826,6 +789,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF10_OTG1_HS;
   HAL_GPIO_Init(USB_FS_ID_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : RMII_TX_EN_Pin RMII_TXD0_Pin */
+  GPIO_InitStruct.Pin = RMII_TX_EN_Pin|RMII_TXD0_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LED_YELLOW_Pin */
   GPIO_InitStruct.Pin = LED_YELLOW_Pin;

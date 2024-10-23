@@ -54,7 +54,11 @@ MEMORY
 /* Define output sections */
 SECTIONS
 {
-  /* The startup code goes first into FLASH */
+	.dma_buffer : /* Space before ':' is critical */
+	{
+	  *(.dma_buffer)
+	} >RAM_D2  /* The startup code goes first into FLASH */
+	
   .isr_vector :
   {
     . = ALIGN(4);
