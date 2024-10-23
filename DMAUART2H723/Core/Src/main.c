@@ -199,7 +199,12 @@ void sendPreparedModbusResponse(void)
 	if (modbusResponseSize)
 	{
 		/* Start UART transmission using DMA */
-		HAL_UART_Transmit_DMA(&huart2, modbusResponse, modbusResponseSize);
+
+		if (HAL_UART_Transmit_DMA(&huart2, modbusResponse, modbusResponseSize) != HAL_OK)
+		{
+			HAL_UART_AbortTransmit(&huart2);
+			HAL_UART_Transmit_DMA(&huart2, modbusResponse, modbusResponseSize);
+		}
 	    /* Enable Transmission Complete Interrupt for UART2 */
 	    //__HAL_UART_ENABLE_IT(&huart2, UART_IT_TC);
 
@@ -333,8 +338,9 @@ void USART2_IRQHandler(void)
     // Handle Transmission Complete (TC)
     if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC) && __HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_TC))
     {
-        __HAL_UART_CLEAR_FLAG(&huart2, UART_FLAG_TC); // Clear Transmission Complete flag
         HAL_UART_TxCpltCallback(&huart2); // Call the Transmission Complete callback
+        __HAL_UART_DISABLE_IT(&huart2, UART_IT_TC);  // Disable the Transmission Complete interrupt
+        __HAL_UART_CLEAR_FLAG(&huart2, UART_FLAG_TC); // Clear Transmission Complete flag
         return;
     }
 
@@ -402,6 +408,7 @@ void enableReceiveMessage(void)
 	uartRXDeny = 0;
 
 	HAL_UART_Receive_DMA(&huart2, modbusRequest, sizeof(modbusRequest));
+
 }
 
 void processReceivedModbusRequests(void)
