@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "string.h"
+#include "stdio.h"
 
 /* USER CODE END Includes */
 
@@ -43,6 +44,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart2_tx;
 DMA_HandleTypeDef hdma_usart2_rx;
 
@@ -72,6 +74,13 @@ uint8_t yellowOn = 0;
 uint16_t errorCounter = 0;
 
 uint16_t uartRXUnknownInterrupt = 0;
+uint16_t uartRXParityErrorInterrupt = 0;
+uint16_t uartRXFramingErrorInterrupt = 0;
+uint16_t uartRXNoiseErrorInterrupt = 0;
+uint16_t uartRXOverrunErrorInterrupt = 0;
+uint16_t uartRXErrorInterrupt = 0;
+
+
 
 uint16_t messagesTXCompleted = 0;				/* successfully sent messages */
 uint16_t messagesTXCompletedUnexpected = 0;		/* unexpected (unknown not sent by us) successfully sent messages */
@@ -115,7 +124,7 @@ volatile uint16_t modbusBytesReceived = 0;
 
 /* timing */
 uint32_t previousMillisTest = 0;   // To store the last tick for test message
-const uint32_t intervalTest = 500; // 500 ms interval test
+const uint32_t intervalTest = 1000; // ms interval test
 
 uint32_t previousMillisLedGreen = 0;   // To store the last tick for turn led off
 uint32_t previousMillisLedRed = 0;   // To store the last tick for turn led off
@@ -133,6 +142,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 void enableReceiveMessage(void);
@@ -141,6 +151,13 @@ void enableReceiveMessage(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+int _write(int file, char *data, int len)
+{
+    // Assuming 'huart2' is the UART handle
+    HAL_UART_Transmit(&huart3, (uint8_t*)data, len, 1000);
+    return len;
+}
 
 void setGreenLed(void)
 {
@@ -210,7 +227,7 @@ void sendPreparedModbusResponse(void)
 
 		sendingMessage = 1;
 		setGreenLed();
-        //printf("Starting transmission of %d bytes\n", modbusResponseSize);  // Debugging line
+        printf("Starting transmission of %d bytes\r\n", modbusResponseSize);  // Debugging line
 	}
 	else
 	{
@@ -335,6 +352,49 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 /* UART interrupt handler for idle line detection */
 void USART2_IRQHandler(void)
 {
+    uint32_t isrflags   = READ_REG(huart2.Instance->ISR);
+    uint32_t errorflags = (isrflags & (uint32_t)(USART_ISR_PE | USART_ISR_FE | USART_ISR_NE | USART_ISR_ORE));
+
+    if (errorflags != RESET)
+    {
+        /* Handle error flags */
+        if ((isrflags & USART_ISR_PE) != RESET)
+        {
+            __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_PEF);
+            // Parity error handling
+            printf("UART Parity Error\r\n");
+            uartRXParityErrorInterrupt++;
+        }
+        if ((isrflags & USART_ISR_FE) != RESET)
+        {
+            __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_FEF);
+            // Framing error handling
+            printf("UART Framing Error\r\n");
+            uartRXFramingErrorInterrupt++;
+        }
+        if ((isrflags & USART_ISR_NE) != RESET)
+        {
+            __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_NEF);
+            // Noise error handling
+            printf("UART Noise Error\r\n");
+            uartRXNoiseErrorInterrupt++;
+        }
+        if ((isrflags & USART_ISR_ORE) != RESET)
+        {
+            __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_OREF);
+            // Overrun error handling
+            printf("UART Overrun Error\r\n");
+            uartRXOverrunErrorInterrupt++;
+        }
+
+        // Optional: abort ongoing transmission or reception
+        HAL_UART_AbortReceive_IT(&huart2); // abort receive operation
+
+        uartRXErrorInterrupt++;
+
+        return;
+    }
+
     // Handle Transmission Complete (TC)
     if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC) && __HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_TC))
     {
@@ -416,9 +476,11 @@ void processReceivedModbusRequests(void)
 
 	if ((uartRXCompleteOnActiveToIdleLine) || (uartRXCompleteOnFullBuffer))
 	{
+
+		printf("Received Message %d bytes Causes: Idle:%d Full:%d\r\n", modbusBytesReceived, uartRXCompleteOnActiveToIdleLine, uartRXCompleteOnFullBuffer);  // Debugging line
+
 		uartRXCompleteOnActiveToIdleLine = 0;
 		uartRXCompleteOnFullBuffer = 0;
-
 
 
 		if (modbusBytesReceived)		/* received non-empty message */
@@ -492,6 +554,7 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_USART2_UART_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
 
   configureDMAforUART2TX();
@@ -547,25 +610,19 @@ int main(void)
 		  }
 	  }
 
-	  if (yellowOn)
+	  /* Non-blocking Led Yellow ms delay */
+	  if (currrentMillis - previousMillisLedYellow >= intervalLedYellow)
 	  {
-		  /* Non-blocking Led Yellow ms delay */
-		  if (currrentMillis - previousMillisLedYellow >= intervalLedYellow)
+		  previousMillisLedYellow = currrentMillis;  /* Update the last tick */
+		  if (yellowOn)
 		  {
-			  previousMillisLedYellow = currrentMillis;  /* Update the last tick */
 			  resetYellowLed(); /* turn off led  */
-		      //printf("Yellow Pulse Off\n");  // Debugging line
-
+		      printf("Yellow Pulse Off\r\n");  // Debugging line
 		  }
-	  }
-	  else
-	  {
-		  /* Non-blocking Led Yellow ms delay */
-		  if (currrentMillis - previousMillisLedYellow >= intervalLedYellow)
+		  else
 		  {
-			  previousMillisLedYellow = currrentMillis;  /* Update the last tick */
 			  setYellowLed(); /* turn on led  */
-			  //printf("Yellow Pulse On\n");  // Debugging line
+			  printf("Yellow Pulse On\r\n");  // Debugging line
 		  }
 	  }
 
@@ -684,6 +741,54 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -768,14 +873,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
   HAL_GPIO_Init(RMII_TXD1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : STLK_VCP_RX_Pin STLK_VCP_TX_Pin */
-  GPIO_InitStruct.Pin = STLK_VCP_RX_Pin|STLK_VCP_TX_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
   /*Configure GPIO pin : USB_FS_PWR_EN_Pin */
   GPIO_InitStruct.Pin = USB_FS_PWR_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -847,7 +944,7 @@ void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+     ex: printf("Wrong parameters value: file %s on line %d\r\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
