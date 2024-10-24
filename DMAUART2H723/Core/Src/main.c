@@ -135,6 +135,55 @@ const uint32_t intervalLedYellow = 1000; // ms interval for led
 
 
 
+#define UART_BUFFER_SIZE 16       // Buffer for up to 16 messages
+#define UART_MAX_MESSAGE_SIZE 256  // Max size of each message
+
+typedef struct {
+    uint8_t buffer[UART_BUFFER_SIZE][UART_MAX_MESSAGE_SIZE];  // Message buffer
+    uint16_t lengths[UART_BUFFER_SIZE];                       // Message lengths
+    uint8_t head;  // Points to the next message to be sent
+    uint8_t tail;  // Points to the next free slot
+    uint8_t count; // Number of messages in the buffer
+} UART_MessageBuffer;
+
+UART_MessageBuffer uart_tx_buffer = { .head = 0, .tail = 0, .count = 0 };  // Initialize buffer
+
+volatile uint8_t uart_transmitting = 0;  // Flag to indicate if transmission is ongoing
+uint16_t debug_buffer_ovf = 0;
+uint16_t debug_buffer_ovf_print = 0;
+uint16_t debug_uart_handle_enterings = 0;
+uint16_t debug_uart_handle_transmit_complete = 0;
+uint16_t debug_uart_handle_transmit_empty = 0;
+uint16_t debug_uart_handle_unknown = 0;
+uint16_t debug_messagesTXCompleted = 0;
+uint16_t debug_messagesTXCompletedUnexpected = 0;
+
+uint16_t debug_uart_handle_receive = 0;
+uint16_t debug_uart_handle_overrun_error = 0;
+uint16_t debug_uart_handle_framing_error = 0;
+uint16_t debug_uart_handle_parity_error = 0;
+uint16_t debug_uart_handle_noise_error = 0;
+
+uint16_t debug_uart_tx_empty_func_enterings = 0;
+uint16_t debug_uart_try_send_func_enterings = 0;
+uint16_t debug_uart_try_send_func_exec = 0;
+uint16_t debug_uart_try_send_func_idle = 0;
+uint16_t debug_uart_add_to_buffer = 0;
+uint16_t debug_uart_try_send_func_exec_immediate = 0;
+
+
+uint16_t debug_transmit_immediate_status_total = 0;
+uint16_t debug_transmit_immediate_status_ok = 0;
+uint16_t debug_transmit_immediate_status_error = 0;
+uint16_t debug_transmit_immediate_status_busy = 0;
+uint16_t debug_transmit_immediate_status_timeout = 0;
+
+uint16_t debug_transmit_status_total = 0;
+uint16_t debug_transmit_status_ok = 0;
+uint16_t debug_transmit_status_error = 0;
+uint16_t debug_transmit_status_busy = 0;
+uint16_t debug_transmit_status_timeout = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -146,18 +195,92 @@ static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 void enableReceiveMessage(void);
+void printBufferHex(char* tag, uint8_t* buffer, uint16_t size);
+
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+//void UART_TxEmpty(void)
+//{
+//	debug_uart_tx_empty_func_enterings++;
+//	__HAL_UART_DISABLE_IT(&huart3, UART_IT_TXE);  // Specifically disable UART Transmit Empty interrupt
+//}
+void UART_TrySendMessagesFromBuffer(void)
+{
+	debug_uart_try_send_func_enterings++;
+	if (uart_tx_buffer.count)
+	{
+		debug_uart_try_send_func_exec++;
+
+
+		uart_transmitting = 1;
+		HAL_StatusTypeDef status = HAL_UART_Transmit_IT(&huart3, uart_tx_buffer.buffer[uart_tx_buffer.head], uart_tx_buffer.lengths[uart_tx_buffer.head]);
+		//__HAL_UART_CLEAR_FLAG(&huart2, UART_FLAG_TC); // Clear Transmission Complete flag
+		//__HAL_UART_ENABLE_IT(&huart3, UART_IT_TC);  // Specifically enable UART Transmit Complete interrupt
+		debug_transmit_status_total++;
+		if(status == HAL_OK)
+		{
+			debug_transmit_status_ok++;
+			// Transmission of the current message is complete
+			uart_tx_buffer.head = (uart_tx_buffer.head + 1) % UART_BUFFER_SIZE;  // Move to the next message
+			uart_tx_buffer.count--;
+		}
+		if(status == HAL_ERROR)
+		{
+			debug_transmit_status_error++;
+		}
+		if(status == HAL_BUSY)
+		{
+			debug_transmit_status_busy++;
+		}
+		if(status == HAL_TIMEOUT)
+		{
+			debug_transmit_status_timeout++;
+		}
+	}
+	else
+	{
+		debug_uart_try_send_func_idle++;
+		uart_transmitting = 0;  // No more messages to send
+		//__HAL_UART_DISABLE_IT(&huart3, UART_IT_TC);  // Specifically disable UART Transmit Complete interrupt
+	}
+}
+
+void UART_AddMessageToBuffer(uint8_t *data, uint16_t len)
+{
+    if (uart_tx_buffer.count < UART_BUFFER_SIZE)
+    {
+        // Add the message to the buffer
+    	debug_uart_add_to_buffer++;
+        memcpy(uart_tx_buffer.buffer[uart_tx_buffer.tail], data, len);
+        uart_tx_buffer.lengths[uart_tx_buffer.tail] = len;
+        uart_tx_buffer.tail = (uart_tx_buffer.tail + 1) % UART_BUFFER_SIZE;  // Increment tail
+        uart_tx_buffer.count++;
+
+        // If UART is not busy, start sending the first message
+		if (uart_transmitting == 0)
+        {
+        	debug_uart_try_send_func_exec_immediate++;
+        	UART_TrySendMessagesFromBuffer();
+        }
+    }
+    else
+    {
+        // Buffer is full, handle overflow (e.g., discard message or notify error)
+        //printf("Buffer full, message discarded!\r\n");
+        debug_buffer_ovf++;
+    }
+}
+
 int _write(int file, char *data, int len)
 {
-    // Assuming 'huart2' is the UART handle
-    HAL_UART_Transmit(&huart3, (uint8_t*)data, len, 1000);
-    return len;
+    UART_AddMessageToBuffer((uint8_t*)data, len);  // Add message to the buffer
+    return len;  // Return the length of the message
 }
+
 
 void setGreenLed(void)
 {
@@ -216,24 +339,34 @@ void sendPreparedModbusResponse(void)
 	if (modbusResponseSize)
 	{
 		/* Start UART transmission using DMA */
+        printf("Transmit Message of %d bytes\r\n", modbusResponseSize);  // Debugging line
+		printBufferHex("TX", modbusResponse, modbusResponseSize);
 
-		if (HAL_UART_Transmit_DMA(&huart2, modbusResponse, modbusResponseSize) != HAL_OK)
+		HAL_StatusTypeDef status = HAL_UART_Transmit_DMA(&huart2, modbusResponse, modbusResponseSize);
+		if (status != HAL_OK)
 		{
-			HAL_UART_AbortTransmit(&huart2);
-			HAL_UART_Transmit_DMA(&huart2, modbusResponse, modbusResponseSize);
+			printf("Error in sendPreparedModbusResponse HAL_UART_Transmit_DMA() call 1 returns:%d\r\n", status);
+			status = HAL_UART_AbortTransmit(&huart2);
+			if (status != HAL_OK)
+			{
+				printf("Error in sendPreparedModbusResponse HAL_UART_AbortTransmit() returns:%d\r\n", status);
+			}
+			status = HAL_UART_Transmit_DMA(&huart2, modbusResponse, modbusResponseSize);
+			if (status != HAL_OK)
+			{
+				printf("Error in sendPreparedModbusResponse HAL_UART_AbortTransmit() call 2 returns:%d\r\n", status);
+			}
 		}
 	    /* Enable Transmission Complete Interrupt for UART2 */
 	    //__HAL_UART_ENABLE_IT(&huart2, UART_IT_TC);
 
 		sendingMessage = 1;
 		setGreenLed();
-        printf("Starting transmission of %d bytes\r\n", modbusResponseSize);  // Debugging line
 	}
 	else
 	{
 		messagesTXIdle++;
 	}
-
 }
 
 void modbusResponsePrepareForLastReceivedRequest(void)
@@ -301,10 +434,32 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART2)
     {
+
+
+    	HAL_DMA_StateTypeDef status = HAL_DMA_GetState(&hdma_usart2_tx);
+    	uint32_t  u32ErrorDMA =            HAL_DMA_GetError(&hdma_usart2_tx);
+    	if ((u32ErrorDMA != 0) || (status != HAL_DMA_STATE_READY))
+		{
+    		printf("HAL_DMA_GetState:%d HAL_DMA_GetError:%u\r\n", (int)status, (unsigned int)u32ErrorDMA);
+		}
+
+
         /* Transmission complete, handle post-transmission actions here */
     	messagesTXCompleted++;
     	if (sendingMessage)
     	{
+    		// Transmission complete, now we can reset the gState if expected
+    		//printf("HAL_UART_TxCpltCallback huart->gState:%d on start\r\n", (int)huart->gState);
+    		if (huart->gState == HAL_UART_STATE_BUSY_TX)
+    		{
+				huart->gState = HAL_UART_STATE_READY;
+    		}
+    		else
+    		{
+    			printf("HAL_UART_TxCpltCallback huart->gState:%d not expected\r\n",(int) huart->gState);
+    		}
+    		//printf("HAL_UART_TxCpltCallback huart->gState:%d on final\r\n",(int) huart->gState);
+
     		sendingMessage = 0;
 
 			enableReceiveMessage();
@@ -317,6 +472,13 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     	}
 
     }
+
+    if (huart->Instance == USART3)  // Only handle USART3
+    {
+    	debug_messagesTXCompleted++;
+    	UART_TrySendMessagesFromBuffer();
+    }
+
 }
 
 
@@ -471,6 +633,36 @@ void enableReceiveMessage(void)
 
 }
 
+void printBufferHex(char* tag, uint8_t* buffer, uint16_t size)
+{
+	char printdata[256] = {0};
+	uint16_t printedbytes = 0;
+
+	do
+	{
+		if((printedbytes % 16) == 0)
+		{
+			if(strlen(printdata))
+			{
+				printf("%s\r\n",printdata);
+			}
+			sprintf(printdata, "%s: ", tag);
+			if(printedbytes == 0)
+			{
+				for (int i = 0; i < strlen(tag); i++)
+				{
+					tag[i] = ' ';
+				}
+			}
+		}
+		sprintf(&printdata[strlen(printdata)], " %02X", buffer[printedbytes]);
+		printedbytes++;
+
+	}while(printedbytes < size);
+	printf("%s\r\n",printdata);
+
+}
+
 void processReceivedModbusRequests(void)
 {
 
@@ -493,6 +685,7 @@ void processReceivedModbusRequests(void)
 
 			messagesRXProcessed++;
 
+			printBufferHex("RX", modbusRequest, modbusBytesReceived);
 
 			/* Prepare response to the received MODBUS request */
 			modbusResponsePrepareForLastReceivedRequest();	/* modbusBytesReceived and modbusRequest used inside | modbusResponseSize and modbusResponse touched inside */
@@ -564,6 +757,23 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  printf("\r\n");
+  printf(".\r\n");
+  printf("..\r\n");
+  printf("...\r\n");
+  printf("-----------------------------------\r\n");
+  printf("Starting Application UART2 DMA Test\r\n");
+  printf("-----------------------------------\r\n");
+  printf("Initialization Message Number 1\r\n");
+  printf("Initialization Message Number 2\r\n");
+  printf("Initialization Message Number 3\r\n");
+  printf("Initialization Message Number 4\r\n");
+  printf("Initialization Message Number 5\r\n");
+  printf("Initialization Message Number 6\r\n");
+  printf("Initialization Message Number 7\r\n");
+  printf("Initialization Message Number 8\r\n");
+  printf("Initialization Message Number 9\r\n");
+  printf("...\r\n");
   HAL_Delay(10);	//10 ms delay
   enableReceiveMessageOnInit();
   testSending = testSendingOnInit;
@@ -783,7 +993,9 @@ static void MX_USART3_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART3_Init 2 */
-
+  HAL_NVIC_SetPriority(USART3_IRQn, 0, 1);  // Set high priority for USART3
+  HAL_NVIC_EnableIRQ(USART3_IRQn);  // Enable interrupt for USART3
+  //__HAL_UART_ENABLE_IT(&huart3, UART_IT_TC);  // Specifically enable UART Transmit Complete interrupt
   /* USER CODE END USART3_Init 2 */
 
 }

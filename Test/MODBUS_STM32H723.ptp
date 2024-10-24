@@ -24,7 +24,7 @@ CHANNELALIAS
 
 SEND
 0
-
+Dummy Message 0x11
 11 11 11 11 11 11 11 11 11 11 11 11 11
 0
 5
@@ -41,6 +41,6 @@ COMMENT Test Dummy Message
 1
 0
 1
-CHECKSUM CRC-MODBUS L #  MODBUS RTU checksum. Lower Byte first ('Little Endian')
+CHECKSUM CRC-MODBUS L # MODBUS RTU checksum. Lower Byte first ('Little Endian')
 0
 
